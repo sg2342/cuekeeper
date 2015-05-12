@@ -8,7 +8,8 @@ open Ck_utils
 
 module Make(Clock : Ck_clock.S)
            (Git : Git_storage_s.S)
-           (G : GUI_DATA) = struct
+           (G : GUI_DATA)
+           (RPC : Cohttp_lwt.Client) = struct
   module R = Ck_rev.Make(Git)
   module Node = R.Node
   module Up = Ck_update.Make(Git)(Clock)(R)
@@ -18,6 +19,8 @@ module Make(Clock : Ck_clock.S)
     let equal a b = Git_storage_s.Log_entry.equal (Slow_set.data a) (Slow_set.data b)
   end
   module Delta_history = Delta_RList.Make(Git_storage_s.Log_entry)(Slow_log_entry)(Git_storage_s.Log_entry_map)
+
+  module OptHead = Tc.Option(Irmin.Hash.SHA1)
 
   type gui_data = G.t
 
@@ -193,6 +196,7 @@ module Make(Clock : Ck_clock.S)
     alert : bool React.S.t;
     mutable review_mode : review_mode;
     hidden_areas : Ck_id.S.t ref;   (* Filter in Work tab *)
+    server : Uri.t option;
   }
 
   module X : sig
@@ -963,7 +967,7 @@ module Make(Clock : Ck_clock.S)
   let revert t entry =
     Up.revert ~repo:t.repo t.master entry
 
-  let make ?(branch="master") repo =
+  let make ?(branch="master") ?server repo =
     let on_update, set_on_update = Lwt.wait () in
     Git.Repository.branch ~if_new:(lazy (init_repo repo)) repo branch >>= Up.make ~on_update >>= fun master ->
     let r = Up.head master in
@@ -982,6 +986,7 @@ module Make(Clock : Ck_clock.S)
       review_mode = `Done;
       keep_me = [];
       hidden_areas;
+      server;
     } in
     Lwt.wakeup set_on_update (fun r ->
       set_alert (R.alert r);
@@ -1033,6 +1038,72 @@ module Make(Clock : Ck_clock.S)
     t.hidden_areas := areas;
     t.update_tree t.r
 
-  let sync t ~from:commit =
-    Up.sync t.master ~from:commit
+  let error fmt =
+    let ret msg = `Error msg in
+    Printf.ksprintf ret fmt
+
+  let (>>!=) x f =
+    x >>= function
+    | `Error _ as e -> return e
+    | `Ok y -> f y
+
+  let get ~base path =
+    RPC.get (Uri.with_path base path) >>= fun (resp, body) ->
+    match resp.Cohttp.Response.status with
+    | `OK -> Cohttp_lwt_body.to_string body >|= fun body -> `Ok body
+    | code -> return (error "Bad status code '%s' from server" (Cohttp.Code.string_of_status code))
+
+  let post ~base path body =
+    let body = Cohttp_lwt_body.of_string (B64.encode body) in
+    RPC.post ~body (Uri.with_path base path) >>= fun (resp, body) ->
+    match resp.Cohttp.Response.status with
+    | `OK -> Cohttp_lwt_body.to_string body >|= fun body -> `Ok body
+    | code -> return (error "Bad status code '%s' from server" (Cohttp.Code.string_of_status code))
+
+  let tracking_branch = "server"
+
+  (* Fetch the current server head and store in our "server" branch.
+   * Returns the [Commit.t] for the server's head. *)
+  let fetch t ~base =
+    begin Git.Repository.branch_head t.repo tracking_branch >|= function
+      | Some last_known -> "fetch/" ^ Irmin.Hash.SHA1.to_hum last_known
+      | None -> "fetch"
+    end >>= get ~base >>!= function
+    | "empty" ->
+        return (`Ok None)
+    | bundle ->
+        Git.Repository.fetch_bundle t.repo ~tracking_branch (B64.decode bundle) >>!= fun commit ->
+        return (`Ok (Some commit))
+
+  let pull t ~base =
+    fetch t ~base >>!= function
+    | None -> Git.Repository.force_branch t.repo tracking_branch None >|= fun () -> `Ok ()
+    | Some commit ->
+    (* If server_head isn't in the history of master, merge it now. *)
+    Up.sync t.master ~from:commit >>!= fun () -> return (`Ok ())
+
+  let push t ~base server_head =
+    (* TODO: only push if new head != server_head *)
+    ignore server_head;
+    let new_head = Up.head t.master |> R.commit in
+    Git.Commit.bundle ~tracking_branch new_head >>= function
+    | None -> return (`Ok ())
+    | Some bundle ->
+    post ~base "push" bundle >>!= function
+    | "ok" -> return (`Ok ())
+    | msg -> return (error "Unexpected response '%s'" msg) (* TODO: retry on concurrent update *)
+
+  type server = t
+
+  let server t =
+    if t.server = None then None
+    else Some t
+
+  let sync t =
+    match t.server with
+    | None -> return (`Error "No server configured; can't sync")
+    | Some base ->
+        pull t ~base >>!= fun server_head ->
+        (* Our master branch now includes [server_head] *)
+        push t ~base server_head
 end
