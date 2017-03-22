@@ -32,13 +32,12 @@ depends: [
   "mirage-http" {test}
   "mirage-types-lwt" {test}
   "ppx_sexp_conv"
-  "lwt" {< "2.7.0"}
-  "cstruct" {>= "1.7.0"}
+  "lwt"
+  "cstruct"
 ]
 depopts: [
   "mirage"
 ]
 conflicts: [
   "mirage-xen-posix" {< "2.3.3"}
-  "conduit" {>= "0.14"}
 ]
