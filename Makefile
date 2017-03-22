@@ -6,7 +6,7 @@ JFLAGS =
 
 VERSION = dev
 RELEASE_DIR = cuekeeper-bin-${VERSION}
-MIRAGE_FLAGS = --unix
+MIRAGE_FLAGS = -t unix --net=socket
 
 client-test: client test
 
