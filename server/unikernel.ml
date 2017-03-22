@@ -1,8 +1,8 @@
 (* Copyright (C) 2015, Thomas Leonard
  * See the README file for details. *)
 
-open Lwt
-open V1_LWT
+open Lwt.Infix
+open Mirage_types_lwt
 
 let src = Logs.Src.create "unikernel" ~doc:"Main unikernel code"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -12,7 +12,7 @@ let task s = Irmin.Task.create ~date:0L ~owner:"Server" s
 
 module Store = Irmin_mem.Make(Irmin.Contents.String)(Irmin.Ref.String)(Irmin.Hash.SHA1)
 
-module Main (Stack:STACKV4) (Conf:KV_RO) (Clock:V1.CLOCK) = struct
+module Main (Stack:Mirage_stack_lwt.V4) (Conf: Mirage_types_lwt.KV_RO) (Clock:Mirage_types.PCLOCK) = struct
   module TCP  = Stack.TCPV4
   module TLS  = Tls_mirage.Make (TCP)
   module X509 = Tls_mirage.X509 (Conf) (Clock)
@@ -62,12 +62,11 @@ module Main (Stack:STACKV4) (Conf:KV_RO) (Clock:V1.CLOCK) = struct
     X509.certificate conf `Default >>= fun cert ->
     let tls_config = Tls.Config.server ~certificates:(`Single cert) () in
     Stack.listen_tcpv4 stack ~port:8443 (fun flow ->
-      let peer, port = TCP.get_dest flow in
-      Log.info (fun f -> f "Connection from %a (client port %d)" Ipaddr.V4.pp_hum peer port);
+      let peer, port = TCP.dst flow in
+      Log.info (fun f -> f "Connection from %s (client port %d)" (Ipaddr.V4.to_string peer) port);
       TLS.server_of_flow tls_config flow >>= function
-      | `Error _ -> Log.warn (fun f -> f "TLS failed"); TCP.close flow
-      | `Eof     -> Log.warn (fun f -> f "TLS eof"); TCP.close flow
-      | `Ok flow  ->
+      | Error e -> Log.warn (fun f -> f "TLS failed"); TCP.close flow
+      | Ok flow  ->
       S.listen http flow >>= fun () ->
       TLS.close flow
     );
